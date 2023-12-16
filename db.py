@@ -1,15 +1,11 @@
-import psycopg2
 from loguru import logger
-from psycopg2 import pool
+from psycopg_pool import ConnectionPool
 
 import config
 
-connection_pool = pool.SimpleConnectionPool(minconn=1,
-                                            maxconn=10,
-                                            user=config.db_user,
-                                            password=config.db_password,
-                                            host=config.db_host,
-                                            database=config.db_name)
+connection_string = f'user={config.db_user} password={config.db_password} host={config.db_host} dbname={config.db_name}'
+
+connection_pool = ConnectionPool(connection_string)
 
 
 def get_db():
@@ -21,39 +17,36 @@ def get_db():
 
 
 def init():
-    conn = connection_pool.getconn()
-
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS item (
-                id SERIAL PRIMARY KEY,
-                message TEXT NOT NULL
-            )
-        ''')
+        with connection_pool.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS item (
+                    id SERIAL PRIMARY KEY,
+                    message TEXT NOT NULL
+                )
+            ''')
 
-        cursor.execute('''
-        CREATE OR REPLACE FUNCTION item_notify()
-            RETURNS trigger AS
-        $$
-        BEGIN
-            PERFORM pg_notify(%s, to_json(NEW)::text);
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
-        ''', [config.notify_channel])
+            cursor.execute(f'''
+            CREATE OR REPLACE FUNCTION item_notify()
+                RETURNS trigger AS
+            $$
+            BEGIN
+                PERFORM pg_notify('{config.notify_channel}', to_json(NEW)::text);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            ''')
 
-        cursor.execute('''
-        CREATE OR REPLACE TRIGGER item_update
-            AFTER INSERT OR UPDATE ON item
-            FOR EACH ROW
-        EXECUTE PROCEDURE item_notify();
-        ''')
+            cursor.execute('''
+            CREATE OR REPLACE TRIGGER item_update
+                AFTER INSERT OR UPDATE ON item
+                FOR EACH ROW
+            EXECUTE PROCEDURE item_notify();
+            ''')
 
-        conn.commit()
+            conn.commit()
 
     except Exception as e:
         logger.exception(e)
         raise
-    finally:
-        connection_pool.putconn(conn)

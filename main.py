@@ -1,17 +1,20 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, AsyncGenerator
 
+import psycopg
 import psycopg2.extensions
 from fastapi import FastAPI, Depends
 from loguru import logger
+from psycopg import Notify
+from psycopg_pool.abc import CT, ACT
 from sse_starlette import EventSourceResponse
 from starlette.requests import Request
 
 import db
 from db import get_db
-from postgres_listener import get_postgres_listener, PostgresListener
+from postgres_listener import get_postgres_listener
 
 
 @asynccontextmanager
@@ -25,12 +28,11 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/")
 async def add_item(request: Request,
-                   db: Annotated[psycopg2.extensions.connection, Depends(get_db)]):
+                   db: Annotated[CT, Depends(get_db)]):
     message = await request.body()
     message = message.decode()
 
-    cursor = db.cursor()
-    cursor.execute('''
+    db.execute('''
     INSERT INTO item (message)
     VALUES (%s)
     ''', [message])
@@ -38,29 +40,36 @@ async def add_item(request: Request,
 
 
 @app.get("/updates")
-def get_updates(req: Request,
-                postgres_listener: Annotated[PostgresListener, Depends(get_postgres_listener)]):
-    queue = postgres_listener.get_listen_queue()
-
+async def get_updates(req: Request,
+                notifications: Annotated[
+                    AsyncGenerator[Notify, None],
+                    Depends(get_postgres_listener)
+                ]):
     async def sse_wrapper():
         id = 0
 
         try:
-            while (msg := await queue.get()) is not None and msg != "close":
-                yield {
-                    'id': id,
-                    'event': 'message',
-                    'data': json.dumps(msg)
-                }
-                id += 1
+            async for notify in notifications:
+                msg = notify.payload
+
+                if msg == "close":
+                    break
 
                 if await req.is_disconnected():
                     break
 
+                yield {
+                    'id': id,
+                    'event': 'message',
+                    'data': msg
+                }
+                id += 1
+
         except asyncio.CancelledError as e:
             logger.info(f"Disconnected from client (via refresh/close) {req.client}")
             raise e
+
         finally:
-            postgres_listener.unsubscribe(queue)
+            notifications.close()
 
     return EventSourceResponse(sse_wrapper())
