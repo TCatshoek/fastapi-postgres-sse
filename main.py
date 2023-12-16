@@ -1,20 +1,16 @@
 import asyncio
-import json
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncGenerator
+from typing import Annotated
 
-import psycopg
-import psycopg2.extensions
 from fastapi import FastAPI, Depends
 from loguru import logger
-from psycopg import Notify
-from psycopg_pool.abc import CT, ACT
+from psycopg_pool.abc import CT
 from sse_starlette import EventSourceResponse
 from starlette.requests import Request
 
 import db
 from db import get_db
-from postgres_listener import get_postgres_listener
+from postgres_listener import get_postgres_listener, PostgresListener
 
 
 @asynccontextmanager
@@ -41,15 +37,17 @@ async def add_item(request: Request,
 
 @app.get("/updates")
 async def get_updates(req: Request,
-                notifications: Annotated[
-                    AsyncGenerator[Notify, None],
+                postgres_listener: Annotated[
+                    PostgresListener,
                     Depends(get_postgres_listener)
                 ]):
     async def sse_wrapper():
         id = 0
 
+        queue = postgres_listener.listen()
+
         try:
-            async for notify in notifications:
+            while notify := await queue.get():
                 msg = notify.payload
 
                 if msg == "close":
@@ -59,8 +57,8 @@ async def get_updates(req: Request,
                     break
 
                 yield {
-                    'id': id,
-                    'event': 'message',
+                    # 'id': id,
+                    # 'event': 'message',
                     'data': msg
                 }
                 id += 1
@@ -70,6 +68,6 @@ async def get_updates(req: Request,
             raise e
 
         finally:
-            notifications.close()
+            postgres_listener.close(queue)
 
     return EventSourceResponse(sse_wrapper())
