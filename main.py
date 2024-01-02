@@ -37,31 +37,23 @@ async def add_item(request: Request,
 
 @app.get("/updates")
 async def get_updates(req: Request,
-                postgres_listener: Annotated[
-                    PostgresListener,
-                    Depends(get_postgres_listener)
-                ]):
+                      postgres_listener: Annotated[
+                          PostgresListener,
+                          Depends(get_postgres_listener)
+                      ]):
     async def sse_wrapper():
-        id = 0
-
         queue = postgres_listener.listen()
 
         try:
             while notify := await queue.get():
                 msg = notify.payload
 
-                if msg == "close":
-                    break
-
                 if await req.is_disconnected():
                     break
 
                 yield {
-                    # 'id': id,
-                    # 'event': 'message',
                     'data': msg
                 }
-                id += 1
 
         except asyncio.CancelledError as e:
             logger.info(f"Disconnected from client (via refresh/close) {req.client}")
